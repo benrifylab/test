@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-ポイ活クローラー v1.7 - Groq(Llama)メイン+Geminiバックアップ
+ポイ活クローラー v1.8 - Groq+OpenRouter+Gemini 3段フォールバック
 """
 
 import os
@@ -13,6 +13,7 @@ from bs4 import BeautifulSoup
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
+OR_API_KEY = os.environ.get("OR_API_KEY", "")
 DISCORD_WEBHOOK = os.environ.get("DISCORD_WEBHOOK", "")
 GITHUB_REPO = os.environ.get("GITHUB_REPOSITORY", "benrifylab/test")
 JST = timezone(timedelta(hours=9))
@@ -36,12 +37,12 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 }
 
-PROMPT_TEMPLATE = """あなたはポイ活の達人です。以下は本日{today}にクロールした日本のお得情報サイトの生データです。
+PROMPT = """あなたはポイ活の達人です。以下は本日{today}にクロールした日本のお得情報サイトの生データです。
 
-この中から今日使えるお得情報を抽出して、以下のフォーマットで出力してください。
+今日使えるお得情報を抽出して以下のフォーマットで出力してください。
 
 ルール:
-- 必ず15件以上抽出すること
+- 必ず15件以上抽出
 - 各案件は1行で書く
 - 割引額、還元率、当選人数などの数字を含める
 - 期限切れは含めない
@@ -80,77 +81,93 @@ def crawl_site(url):
             text = el.get_text(strip=True)
             if 10 < len(text) < 200:
                 items.append(text)
-        result = "\n".join(dict.fromkeys(items))
-        return result[:5000]
+        return "\n".join(dict.fromkeys(items))[:5000]
     except Exception:
         return ""
 
 
 def call_groq(prompt):
-    """Groq API (Llama) - 無料・爆速"""
     if not GROQ_API_KEY:
+        print("  Groq: キーなし skip")
         return ""
-    url = "https://api.groq.com/openai/v1/chat/completions"
-    headers = {
-        "Authorization": "Bearer " + GROQ_API_KEY,
-        "Content-Type": "application/json"
-    }
+    headers = {"Authorization": "Bearer " + GROQ_API_KEY, "Content-Type": "application/json"}
     payload = {
         "model": "llama-3.3-70b-versatile",
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 4000,
-        "temperature": 0.3
+        "max_tokens": 4000, "temperature": 0.3
     }
-    for attempt in range(2):
-        try:
-            resp = requests.post(url, json=payload, headers=headers, timeout=120)
-            resp.raise_for_status()
-            text = resp.json()["choices"][0]["message"]["content"]
-            print("  Groq出力: " + str(len(text)) + "字")
-            return text
-        except Exception as e:
-            print("  Groq試行" + str(attempt + 1) + ": " + str(e)[:100])
-            if attempt < 1:
-                time.sleep(10)
-    return ""
+    try:
+        resp = requests.post("https://api.groq.com/openai/v1/chat/completions", json=payload, headers=headers, timeout=120)
+        resp.raise_for_status()
+        text = resp.json()["choices"][0]["message"]["content"]
+        print("  Groq出力: " + str(len(text)) + "字 OK")
+        return text
+    except Exception as e:
+        print("  Groq失敗: " + str(e)[:150])
+        return ""
+
+
+def call_openrouter(prompt):
+    if not OR_API_KEY:
+        print("  OpenRouter: キーなし skip")
+        return ""
+    headers = {"Authorization": "Bearer " + OR_API_KEY, "Content-Type": "application/json"}
+    payload = {
+        "model": "meta-llama/llama-3.3-70b-instruct:free",
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 4000, "temperature": 0.3
+    }
+    try:
+        resp = requests.post("https://openrouter.ai/api/v1/chat/completions", json=payload, headers=headers, timeout=120)
+        resp.raise_for_status()
+        text = resp.json()["choices"][0]["message"]["content"]
+        print("  OpenRouter出力: " + str(len(text)) + "字 OK")
+        return text
+    except Exception as e:
+        print("  OpenRouter失敗: " + str(e)[:150])
+        return ""
 
 
 def call_gemini(prompt):
-    """Gemini API - バックアップ"""
     if not GEMINI_API_KEY:
+        print("  Gemini: キーなし skip")
         return ""
     api_url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=" + GEMINI_API_KEY
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {"maxOutputTokens": 4000, "temperature": 0.3}
     }
-    for attempt in range(2):
-        try:
-            resp = requests.post(api_url, json=payload, timeout=120)
-            resp.raise_for_status()
-            text = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
-            print("  Gemini出力: " + str(len(text)) + "字")
-            return text
-        except Exception as e:
-            error_msg = str(e)
-            if GEMINI_API_KEY:
-                error_msg = error_msg.replace(GEMINI_API_KEY, "***")
-            print("  Gemini試行" + str(attempt + 1) + ": " + error_msg[:100])
-            if attempt < 1:
-                time.sleep(15)
-    return ""
+    try:
+        resp = requests.post(api_url, json=payload, timeout=120)
+        resp.raise_for_status()
+        text = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+        print("  Gemini出力: " + str(len(text)) + "字 OK")
+        return text
+    except Exception as e:
+        error_msg = str(e)
+        if GEMINI_API_KEY:
+            error_msg = error_msg.replace(GEMINI_API_KEY, "***")
+        print("  Gemini失敗: " + error_msg[:150])
+        return ""
 
 
 def summarize(all_data):
-    """Groq優先、失敗したらGemini"""
-    prompt = PROMPT_TEMPLATE.replace("{today}", TODAY).replace("{data}", all_data[:18000])
+    prompt = PROMPT.replace("{today}", TODAY).replace("{data}", all_data[:18000])
 
-    print("  [1] Groq (Llama3.3-70B) で要約中...")
+    # 1. Groq（最速）
+    print("[1/3] Groq...")
     result = call_groq(prompt)
     if result and len(result) > 200:
         return result
 
-    print("  [2] Gemini 2.0 Flash にフォールバック...")
+    # 2. OpenRouter（無料Llama）
+    print("[2/3] OpenRouter...")
+    result = call_openrouter(prompt)
+    if result and len(result) > 200:
+        return result
+
+    # 3. Gemini（バックアップ）
+    print("[3/3] Gemini...")
     result = call_gemini(prompt)
     if result and len(result) > 200:
         return result
@@ -185,13 +202,13 @@ hr{border-color:#21262d}
 <br>
 """ + body + """
 <hr>
-<p class="t">Groq(Llama) + GitHub Actions で自動生成（完全無料）</p>
+<p class="t">GitHub Actions + AI(Groq/OpenRouter/Gemini) 自動生成</p>
 </body>
 </html>"""
 
     with open("docs/index.html", "w", encoding="utf-8") as f:
         f.write(html)
-    print("  HTML保存完了")
+    print("HTML保存完了")
 
 
 def git_push():
@@ -203,9 +220,9 @@ def git_push():
         if result.returncode != 0:
             subprocess.run(["git", "commit", "-m", "update " + TODAY], check=True)
             subprocess.run(["git", "push"], check=True)
-            print("  Git push完了")
+            print("Git push完了")
     except Exception as e:
-        print("  Git push失敗: " + str(e))
+        print("Git push失敗: " + str(e))
 
 
 def send_discord(msg):
@@ -214,15 +231,14 @@ def send_discord(msg):
         return
     try:
         resp = requests.post(DISCORD_WEBHOOK, json={"content": msg[:1990]}, timeout=10)
-        print("  Discord -> " + str(resp.status_code))
+        print("Discord -> " + str(resp.status_code))
     except Exception as e:
-        print("  Discord失敗: " + str(e))
+        print("Discord失敗: " + str(e))
 
 
 def main():
-    print("=== v1.7 " + TODAY + " ===")
+    print("=== v1.8 " + TODAY + " ===")
 
-    # 1. クロール
     all_texts = []
     for t in TARGETS:
         print("  " + t["name"] + "...")
@@ -233,14 +249,11 @@ def main():
     combined = "\n".join(all_texts)
     print("合計" + str(len(combined)) + "字")
 
-    # 2. AI要約（Groq優先→Geminiバックアップ）
     full = summarize(combined)
 
-    # 3. GitHub Pages保存
     save_html(full)
     git_push()
 
-    # 4. Discord（先頭+リンク）
     pages_url = "https://" + GITHUB_REPO.split("/")[0] + ".github.io/" + GITHUB_REPO.split("/")[1] + "/"
     lines = full.strip().split("\n")
     short = "\n".join(lines[:15])
