@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-ポイ活クローラー v1.2 - Discord文字制限対応版
+ポイ活クローラー v1.3 - APIキー保護+リトライ対応
 """
 
 import os
 import re
-import json
+import time
 import requests
 from datetime import datetime, timezone, timedelta
 from bs4 import BeautifulSoup
@@ -47,7 +47,7 @@ def crawl_site(url):
                 items.append(text)
         result = "\n".join(dict.fromkeys(items))
         return result[:6000]
-    except Exception as e:
+    except Exception:
         return ""
 
 
@@ -75,13 +75,24 @@ def summarize_gemini(all_data):
         "generationConfig": {"maxOutputTokens": 1500, "temperature": 0.2}
     }
 
-    try:
-        resp = requests.post(api_url, json=payload, timeout=120)
-        resp.raise_for_status()
-        data = resp.json()
-        return data["candidates"][0]["content"]["parts"][0]["text"]
-    except Exception as e:
-        return "[要約失敗: " + str(e) + "]"
+    # 3回リトライ（503対策）
+    for attempt in range(3):
+        try:
+            resp = requests.post(api_url, json=payload, timeout=120)
+            resp.raise_for_status()
+            data = resp.json()
+            return data["candidates"][0]["content"]["parts"][0]["text"]
+        except Exception as e:
+            error_msg = str(e)
+            # APIキーをエラーメッセージから除去
+            if GEMINI_API_KEY:
+                error_msg = error_msg.replace(GEMINI_API_KEY, "***")
+            print("  Gemini試行" + str(attempt+1) + "/3 失敗: " + error_msg)
+            if attempt < 2:
+                print("  30秒待機してリトライ...")
+                time.sleep(30)
+
+    return "[要約失敗: Gemini API 3回リトライ後も応答なし。しばらく待って再実行してください]"
 
 
 def send_discord(message):
@@ -89,7 +100,6 @@ def send_discord(message):
         print(message)
         return
 
-    # 改行位置で分割（2000文字制限対応）
     if len(message) <= 1990:
         chunks = [message]
     else:
@@ -114,7 +124,7 @@ def send_discord(message):
 
 
 def main():
-    print("=== v1.2 " + TODAY + " ===")
+    print("=== v1.3 " + TODAY + " ===")
 
     all_texts = []
     for t in TARGETS:
