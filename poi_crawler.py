@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-ポイ活クローラー v1.4 - GitHub Pages全文保存+Discord短縮版
+ポイ活クローラー v1.5 - 全文保存修正版
 """
 
 import os
@@ -17,7 +17,7 @@ GITHUB_REPO = os.environ.get("GITHUB_REPOSITORY", "benrifylab/test")
 JST = timezone(timedelta(hours=9))
 NOW = datetime.now(JST)
 TODAY = NOW.strftime("%Y/%m/%d %H:%M")
-DATE_FILE = NOW.strftime("%Y%m%d_%H%M")
+
 
 TARGETS = [
     {"name": "節約速報", "url": "https://setusoku.com/", "category": "総合"},
@@ -55,29 +55,12 @@ def crawl_site(url):
         return ""
 
 
-def summarize_gemini(all_data, max_tokens=2500):
+def call_gemini(prompt, max_tokens=3000):
     api_url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=" + GEMINI_API_KEY
-
-    prompt = "本日 " + TODAY + " のお得情報を以下の生データから抽出してください。\n\n"
-    prompt += "【絶対ルール】\n"
-    prompt += "- 1案件=1行で簡潔に書くこと\n"
-    prompt += "- 15-20件抽出すること\n"
-    prompt += "- 期限切れは除外\n"
-    prompt += "- 数字（割引額/還元率/当選数）を必ず含める\n\n"
-    prompt += "【出力フォーマット】\n"
-    prompt += "🛒EC\n・案件：内容（~M/D）\n\n"
-    prompt += "💳決済\n・案件：内容（~M/D）\n\n"
-    prompt += "🍔外食\n・案件：内容（~M/D）\n\n"
-    prompt += "🎁無料/懸賞\n・案件：内容（~M/D）\n\n"
-    prompt += "📱携帯\n・案件：内容（~M/D）\n\n"
-    prompt += "---\n"
-    prompt += all_data[:28000]
-
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {"maxOutputTokens": max_tokens, "temperature": 0.2}
     }
-
     for attempt in range(3):
         try:
             resp = requests.post(api_url, json=payload, timeout=120)
@@ -88,129 +71,173 @@ def summarize_gemini(all_data, max_tokens=2500):
             error_msg = str(e)
             if GEMINI_API_KEY:
                 error_msg = error_msg.replace(GEMINI_API_KEY, "***")
-            print("  Gemini試行" + str(attempt+1) + "/3: " + error_msg)
+            print("  Gemini試行" + str(attempt + 1) + "/3: " + error_msg)
             if attempt < 2:
                 time.sleep(30)
+    return ""
 
-    return "[要約失敗: Gemini API応答なし]"
+
+def make_full_summary(all_data):
+    prompt = "あなたはポイ活・節約の専門家です。本日 " + TODAY + " の生データから、今日使えるお得情報を全て抽出してください。\n\n"
+    prompt += "【ルール】\n"
+    prompt += "- 20-30件を目標に、できるだけ多く抽出\n"
+    prompt += "- カテゴリ別に分類\n"
+    prompt += "- 各案件は「案件名：お得内容（期限）」の形式\n"
+    prompt += "- 割引額・還元率・当選人数など数字を必ず含める\n"
+    prompt += "- 期限切れは除外\n\n"
+    prompt += "【カテゴリ】\n"
+    prompt += "🛒 EC・ネット通販\n"
+    prompt += "💳 クレカ・キャッシュレス決済\n"
+    prompt += "🍔 外食・フード\n"
+    prompt += "🎁 懸賞・無料・プレゼント\n"
+    prompt += "📱 携帯・通信\n"
+    prompt += "🏷️ その他お得情報\n\n"
+    prompt += "---\n" + all_data[:28000]
+    return call_gemini(prompt, max_tokens=3000)
 
 
-def save_html_report(full_report):
-    """GitHub Pages用のHTMLを生成して保存"""
+def make_short_summary(full_summary):
+    prompt = "以下のお得情報まとめから、最もお得度が高いTOP8件だけを選んで、超短縮版を作ってください。\n\n"
+    prompt += "【ルール】\n"
+    prompt += "- 合計800文字以内\n"
+    prompt += "- 1件1行、30文字以内\n"
+    prompt += "- カテゴリの絵文字は残す\n\n"
+    prompt += full_summary
+    return call_gemini(prompt, max_tokens=600)
+
+
+def save_html(full_summary):
     os.makedirs("docs", exist_ok=True)
 
-    # Markdownの簡易変換
-    html_body = full_report
-    html_body = html_body.replace("&", "&amp;")
-    html_body = html_body.replace("<", "&lt;")
-    html_body = html_body.replace(">", "&gt;")
-    html_body = html_body.replace("\n", "<br>\n")
-    # **太字** 変換
-    import re as r
-    html_body = r.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', html_body)
+    # HTML変換
+    body = full_summary
+    body = body.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    body = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', body)
+
+    # カテゴリ絵文字を見出しに
+    body = body.replace("🛒", '<h2 style="color:#4fc3f7">🛒')
+    body = body.replace("💳", '<h2 style="color:#ffd54f">💳')
+    body = body.replace("🍔", '<h2 style="color:#ff8a65">🍔')
+    body = body.replace("🎁", '<h2 style="color:#ce93d8">🎁')
+    body = body.replace("📱", '<h2 style="color:#81c784">📱')
+    body = body.replace("🏷", '<h2 style="color:#90a4ae">🏷')
+
+    # 見出し閉じタグを追加（次の行の前に）
+    lines = body.split("\n")
+    result_lines = []
+    in_h2 = False
+    for line in lines:
+        if "<h2" in line and in_h2:
+            result_lines.append("</h2>")
+        if "<h2" in line:
+            in_h2 = True
+            result_lines.append(line)
+        else:
+            if in_h2 and line.strip() == "":
+                result_lines.append("</h2>")
+                in_h2 = False
+            result_lines.append(line)
+    if in_h2:
+        result_lines.append("</h2>")
+
+    body_html = "<br>\n".join(result_lines)
 
     html = """<!DOCTYPE html>
 <html lang="ja">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>ポイ活日報 """ + TODAY + """</title>
+<title>ポイ活日報</title>
 <style>
-body { font-family: -apple-system, sans-serif; max-width: 700px; margin: 0 auto; padding: 16px; background: #1a1a2e; color: #e0e0e0; line-height: 1.7; }
-h1 { color: #00d4ff; font-size: 1.3em; border-bottom: 2px solid #00d4ff; padding-bottom: 8px; }
-strong { color: #ffd700; }
-br + br { display: block; margin-top: 8px; }
-.updated { color: #888; font-size: 0.85em; }
+* { box-sizing: border-box; }
+body {
+  font-family: -apple-system, 'Hiragino Sans', sans-serif;
+  max-width: 720px; margin: 0 auto; padding: 16px;
+  background: #0d1117; color: #c9d1d9; line-height: 1.8;
+}
+h1 { color: #58a6ff; font-size: 1.4em; border-bottom: 2px solid #58a6ff; padding-bottom: 8px; }
+h2 { font-size: 1.1em; margin-top: 20px; margin-bottom: 4px; }
+strong { color: #ffa657; }
+.time { color: #8b949e; font-size: 0.85em; }
+.item { padding: 4px 0; border-bottom: 1px solid #21262d; }
 </style>
 </head>
 <body>
 <h1>📋 ポイ活日報</h1>
-<p class="updated">更新: """ + TODAY + """</p>
-""" + html_body + """
+<p class="time">""" + TODAY + """ 更新</p>
+""" + body_html + """
+<hr style="border-color:#21262d; margin-top:30px;">
+<p class="time">GitHub Actions + Gemini Flash で自動生成（完全無料）</p>
 </body>
 </html>"""
 
     with open("docs/index.html", "w", encoding="utf-8") as f:
         f.write(html)
-
-    print("  HTML保存完了: docs/index.html")
+    print("  HTML保存完了")
 
 
 def git_push():
-    """生成したHTMLをGitHubにpush"""
     try:
         subprocess.run(["git", "config", "user.name", "poi-bot"], check=True)
         subprocess.run(["git", "config", "user.email", "bot@example.com"], check=True)
         subprocess.run(["git", "add", "docs/"], check=True)
         result = subprocess.run(["git", "diff", "--cached", "--quiet"])
         if result.returncode != 0:
-            subprocess.run(["git", "commit", "-m", "日報更新 " + TODAY], check=True)
+            subprocess.run(["git", "commit", "-m", "update " + TODAY], check=True)
             subprocess.run(["git", "push"], check=True)
             print("  Git push完了")
         else:
-            print("  変更なし、pushスキップ")
+            print("  変更なしskip")
     except Exception as e:
         print("  Git push失敗: " + str(e))
 
 
-def send_discord(short_msg):
+def send_discord(msg):
     if not DISCORD_WEBHOOK:
-        print(short_msg)
+        print(msg)
         return
     try:
-        resp = requests.post(DISCORD_WEBHOOK, json={"content": short_msg}, timeout=10)
+        resp = requests.post(DISCORD_WEBHOOK, json={"content": msg[:1990]}, timeout=10)
         print("  Discord -> " + str(resp.status_code))
     except Exception as e:
         print("  Discord失敗: " + str(e))
 
 
 def main():
-    print("=== v1.4 " + TODAY + " ===")
+    print("=== v1.5 " + TODAY + " ===")
 
     # 1. クロール
     all_texts = []
     for t in TARGETS:
         print("  " + t["name"] + "...")
         text = crawl_site(t["url"])
-        all_texts.append("\n=== " + t["name"] + " ===\n" + text)
+        all_texts.append("\n=== " + t["name"] + " (" + t["category"] + ") ===\n" + text)
         print("    " + str(len(text)) + "字")
 
     combined = "\n".join(all_texts)
     print("合計" + str(len(combined)) + "字")
 
-    # 2. Gemini要約（全文版）
-    print("Gemini要約中...")
-    full_summary = summarize_gemini(combined, max_tokens=2500)
+    # 2. 全文要約（GitHub Pages用）
+    print("Gemini全文要約中...")
+    full_summary = make_full_summary(combined)
+    if not full_summary:
+        full_summary = "Gemini API応答なし。次回の自動実行をお待ちください。"
+    print("  全文: " + str(len(full_summary)) + "字")
 
-    # 3. GitHub Pages に全文保存
-    full_report = "📋 ポイ活日報 " + TODAY + "\n\n" + full_summary
-    save_html_report(full_report)
+    # 3. HTML保存 + push
+    save_html(full_summary)
     git_push()
 
-    # 4. Discord には短縮版 + リンク
+    # 4. Discord用に短縮版を別途生成
+    print("Discord短縮版生成中...")
+    short = make_short_summary(full_summary)
+    if not short:
+        short = full_summary[:800]
+
     pages_url = "https://" + GITHUB_REPO.split("/")[0] + ".github.io/" + GITHUB_REPO.split("/")[1] + "/"
-
-    # 全文から先頭を切り出してDiscord用に
-    lines = full_summary.strip().split("\n")
-    short_lines = []
-    count = 0
-    for line in lines:
-        short_lines.append(line)
-        if line.startswith("・"):
-            count += 1
-        if count >= 7:
-            break
-
-    short_text = "\n".join(short_lines)
-
     discord_msg = "📋 **ポイ活日報 " + TODAY + "**\n\n"
-    discord_msg += short_text
-    discord_msg += "\n\n...他多数\n\n"
-    discord_msg += "📖 **全文はこちら →** " + pages_url
-
-    # 2000文字に収める
-    if len(discord_msg) > 1990:
-        discord_msg = discord_msg[:1980] + "\n..." + pages_url
+    discord_msg += short
+    discord_msg += "\n\n📖 全文 → " + pages_url
 
     print("Discord送信...")
     send_discord(discord_msg)
