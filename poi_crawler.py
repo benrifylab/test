@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-ポイ活クローラー v1.1 - 要約精度改善版
+ポイ活クローラー v1.2 - Discord文字制限対応版
 """
 
 import os
 import re
+import json
 import requests
 from datetime import datetime, timezone, timedelta
 from bs4 import BeautifulSoup
@@ -12,7 +13,7 @@ from bs4 import BeautifulSoup
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 DISCORD_WEBHOOK = os.environ.get("DISCORD_WEBHOOK", "")
 JST = timezone(timedelta(hours=9))
-TODAY = datetime.now(JST).strftime("%Y年%m月%d日 %H:%M")
+TODAY = datetime.now(JST).strftime("%Y/%m/%d %H:%M")
 
 TARGETS = [
     {"name": "節約速報", "url": "https://setusoku.com/", "category": "総合"},
@@ -28,7 +29,7 @@ TARGETS = [
 ]
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 }
 
 
@@ -39,117 +40,99 @@ def crawl_site(url):
         soup = BeautifulSoup(resp.text, "html.parser")
         for tag in soup(["script", "style", "nav", "footer", "header", "aside", "form", "iframe"]):
             tag.decompose()
-
-        # リンクテキスト+タイトルを重点的に抽出
         items = []
-        # 見出しとリンクを優先取得
         for el in soup.find_all(["h1", "h2", "h3", "h4", "a", "p", "li", "td"]):
             text = el.get_text(strip=True)
-            if len(text) > 10 and len(text) < 200:
+            if 10 < len(text) < 200:
                 items.append(text)
-
-        result = "\n".join(dict.fromkeys(items))  # 重複除去
+        result = "\n".join(dict.fromkeys(items))
         return result[:6000]
     except Exception as e:
-        return f"[クロール失敗: {e}]"
+        return ""
 
 
 def summarize_gemini(all_data):
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
+    api_url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=" + GEMINI_API_KEY
 
-    prompt = f"""あなたはポイ活・節約情報の専門家です。
-以下は本日 {TODAY} に日本の各お得情報サイトからクロールした生テキストです。
-
-【指示】
-この中から「今日使えるお得情報」を **最低15件、最大25件** 抽出してください。
-
-【出力フォーマット（厳守）】
-各カテゴリの絵文字を付けて、1案件1〜2行で書いてください。
-
-🛒 **EC・ネット通販**
-- （案件名）：（何がどうお得か）（期限：〜月/日）
-
-💳 **クレカ・キャッシュレス決済**
-- （案件名）：（何がどうお得か）（期限：〜月/日）
-
-🍔 **外食・フード**
-- （案件名）：（何がどうお得か）（期限：〜月/日）
-
-🎁 **懸賞・無料・プレゼント**
-- （案件名）：（何がどうお得か）（期限：〜月/日）
-
-📱 **携帯・通信**
-- （案件名）：（何がどうお得か）（期限：〜月/日）
-
-【ルール】
-- 期限切れの案件は絶対に含めないこと
-- 割引額・還元率・当選人数など数字を必ず含めること
-- 重要度・お得度が高い順に並べること
-- 情報が少ないカテゴリは無理に埋めなくてよい
-- 日本語で出力
-
----
-以下が生データです：
-
-{all_data[:30000]}
-"""
+    prompt = "本日 " + TODAY + " のお得情報を以下の生データから抽出してください。\n\n"
+    prompt += "【絶対ルール】\n"
+    prompt += "- 合計1500文字以内に収めること（超重要）\n"
+    prompt += "- 1案件=1行で簡潔に書くこと\n"
+    prompt += "- 15-20件抽出すること\n"
+    prompt += "- 期限切れは除外\n"
+    prompt += "- 数字（割引額/還元率/当選数）を必ず含める\n\n"
+    prompt += "【出力フォーマット】\n"
+    prompt += "🛒EC\n・案件：内容（~M/D）\n\n"
+    prompt += "💳決済\n・案件：内容（~M/D）\n\n"
+    prompt += "🍔外食\n・案件：内容（~M/D）\n\n"
+    prompt += "🎁無料/懸賞\n・案件：内容（~M/D）\n\n"
+    prompt += "📱携帯\n・案件：内容（~M/D）\n\n"
+    prompt += "---\n"
+    prompt += all_data[:28000]
 
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {
-            "maxOutputTokens": 4096,
-            "temperature": 0.3
-        }
+        "generationConfig": {"maxOutputTokens": 1500, "temperature": 0.2}
     }
 
     try:
-        resp = requests.post(url, json=payload, timeout=120)
+        resp = requests.post(api_url, json=payload, timeout=120)
         resp.raise_for_status()
         data = resp.json()
         return data["candidates"][0]["content"]["parts"][0]["text"]
     except Exception as e:
-        return f"[Gemini要約失敗: {e}]\n\n生データの先頭部分:\n{all_data[:500]}"
+        return "[要約失敗: " + str(e) + "]"
 
 
 def send_discord(message):
     if not DISCORD_WEBHOOK:
-        print("[SKIP] Discord Webhook未設定")
         print(message)
         return
 
-    chunks = [message[i:i + 1990] for i in range(0, len(message), 1990)]
+    # 改行位置で分割（2000文字制限対応）
+    if len(message) <= 1990:
+        chunks = [message]
+    else:
+        chunks = []
+        current = ""
+        for line in message.split("\n"):
+            if len(current) + len(line) + 1 > 1990:
+                if current:
+                    chunks.append(current)
+                current = line
+            else:
+                current = current + "\n" + line if current else line
+        if current:
+            chunks.append(current)
+
     for i, chunk in enumerate(chunks):
         try:
             resp = requests.post(DISCORD_WEBHOOK, json={"content": chunk}, timeout=10)
-            print(f"  [Discord] {i+1}/{len(chunks)} -> {resp.status_code}")
+            print("  Discord " + str(i+1) + "/" + str(len(chunks)) + " -> " + str(resp.status_code))
         except Exception as e:
-            print(f"  [Discord] 失敗: {e}")
+            print("  Discord失敗: " + str(e))
 
 
 def main():
-    print(f"=== ポイ活クローラー v1.1 起動 {TODAY} ===\n")
+    print("=== v1.2 " + TODAY + " ===")
 
     all_texts = []
     for t in TARGETS:
-        print(f"  {t['category']} | {t['name']}...")
+        print("  " + t["name"] + "...")
         text = crawl_site(t["url"])
-        all_texts.append(f"\n=== {t['name']}（{t['category']}）===\n{text}")
-        print(f"    -> {len(text)}文字")
+        all_texts.append("\n=== " + t["name"] + " ===\n" + text)
+        print("    " + str(len(text)) + "字")
 
-    combined = "\n\n".join(all_texts)
-    print(f"\n合計: {len(combined)}文字\n")
+    combined = "\n".join(all_texts)
+    print("合計" + str(len(combined)) + "字")
 
-    print("Gemini Flash で要約中...")
+    print("Gemini要約中...")
     summary = summarize_gemini(combined)
 
-    report = f"📋 **ポイ活日報 {TODAY}**\n\n{summary}"
+    report = "📋 **ポイ活日報 " + TODAY + "**\n\n" + summary
+    print(report[:500])
 
-    # ログ出力
-    print(f"\n{'='*50}")
-    print(report[:2000])
-    print(f"{'='*50}\n")
-
-    print("Discord送信中...")
+    print("Discord送信...")
     send_discord(report)
     print("完了！")
 
