@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-ポイ活クローラー v1.8 - Groq+OpenRouter+Gemini 3段フォールバック
+ポイ活クローラー v1.9 - Groq入力サイズ修正
 """
 
 import os
@@ -37,33 +37,30 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 }
 
-PROMPT = """あなたはポイ活の達人です。以下は本日{today}にクロールした日本のお得情報サイトの生データです。
-
-今日使えるお得情報を抽出して以下のフォーマットで出力してください。
+PROMPT = """あなたはポイ活の達人です。本日{today}のお得情報を抽出してください。
 
 ルール:
-- 必ず15件以上抽出
-- 各案件は1行で書く
-- 割引額、還元率、当選人数などの数字を含める
-- 期限切れは含めない
-- お得度が高い順
+- 15件以上抽出
+- 1案件1行
+- 数字（割引額/還元率/当選数）を含める
+- 期限切れ除外
+- お得度順
 
 フォーマット:
+🛒 EC
+・案件：内容（~M/D）
 
-🛒 EC・ネット通販
-・案件名：内容（~M/D）
+💳 決済
+・案件：内容（~M/D）
 
-💳 クレカ・キャッシュレス
-・案件名：内容（~M/D）
+🍔 外食
+・案件：内容（~M/D）
 
-🍔 外食・フード
-・案件名：内容（~M/D）
+🎁 懸賞
+・案件：内容（~M/D）
 
-🎁 懸賞・無料
-・案件名：内容（~M/D）
-
-📱 携帯・通信
-・案件名：内容（~M/D）
+📱 携帯
+・案件：内容（~M/D）
 
 --- 生データ ---
 {data}"""
@@ -77,107 +74,109 @@ def crawl_site(url):
         for tag in soup(["script", "style", "nav", "footer", "header", "aside", "form", "iframe"]):
             tag.decompose()
         items = []
-        for el in soup.find_all(["h1", "h2", "h3", "h4", "a", "p", "li", "td"]):
+        for el in soup.find_all(["h1", "h2", "h3", "h4", "a", "p", "li"]):
             text = el.get_text(strip=True)
-            if 10 < len(text) < 200:
+            if 15 < len(text) < 150:
                 items.append(text)
-        return "\n".join(dict.fromkeys(items))[:5000]
+        return "\n".join(dict.fromkeys(items))[:3000]
     except Exception:
         return ""
 
 
 def call_groq(prompt):
     if not GROQ_API_KEY:
-        print("  Groq: キーなし skip")
+        print("  Groq: キーなし")
         return ""
     headers = {"Authorization": "Bearer " + GROQ_API_KEY, "Content-Type": "application/json"}
     payload = {
         "model": "llama-3.3-70b-versatile",
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 4000, "temperature": 0.3
+        "max_tokens": 3000, "temperature": 0.3
     }
     try:
         resp = requests.post("https://api.groq.com/openai/v1/chat/completions", json=payload, headers=headers, timeout=120)
         resp.raise_for_status()
         text = resp.json()["choices"][0]["message"]["content"]
-        print("  Groq出力: " + str(len(text)) + "字 OK")
+        print("  Groq: " + str(len(text)) + "字 OK!")
         return text
     except Exception as e:
-        print("  Groq失敗: " + str(e)[:150])
+        print("  Groq失敗: " + str(e)[:120])
         return ""
 
 
 def call_openrouter(prompt):
     if not OR_API_KEY:
-        print("  OpenRouter: キーなし skip")
+        print("  OR: キーなし")
         return ""
     headers = {"Authorization": "Bearer " + OR_API_KEY, "Content-Type": "application/json"}
     payload = {
         "model": "meta-llama/llama-3.3-70b-instruct:free",
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 4000, "temperature": 0.3
+        "max_tokens": 3000, "temperature": 0.3
     }
     try:
         resp = requests.post("https://openrouter.ai/api/v1/chat/completions", json=payload, headers=headers, timeout=120)
         resp.raise_for_status()
         text = resp.json()["choices"][0]["message"]["content"]
-        print("  OpenRouter出力: " + str(len(text)) + "字 OK")
+        print("  OR: " + str(len(text)) + "字 OK!")
         return text
     except Exception as e:
-        print("  OpenRouter失敗: " + str(e)[:150])
+        print("  OR失敗: " + str(e)[:120])
         return ""
 
 
 def call_gemini(prompt):
     if not GEMINI_API_KEY:
-        print("  Gemini: キーなし skip")
+        print("  Gemini: キーなし")
         return ""
     api_url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=" + GEMINI_API_KEY
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"maxOutputTokens": 4000, "temperature": 0.3}
+        "generationConfig": {"maxOutputTokens": 3000, "temperature": 0.3}
     }
     try:
         resp = requests.post(api_url, json=payload, timeout=120)
         resp.raise_for_status()
         text = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
-        print("  Gemini出力: " + str(len(text)) + "字 OK")
+        print("  Gemini: " + str(len(text)) + "字 OK!")
         return text
     except Exception as e:
         error_msg = str(e)
         if GEMINI_API_KEY:
             error_msg = error_msg.replace(GEMINI_API_KEY, "***")
-        print("  Gemini失敗: " + error_msg[:150])
+        print("  Gemini失敗: " + error_msg[:120])
         return ""
 
 
 def summarize(all_data):
-    prompt = PROMPT.replace("{today}", TODAY).replace("{data}", all_data[:18000])
+    # Groq用は短め、他は少し長め
+    short_data = all_data[:6000]
+    long_data = all_data[:12000]
 
-    # 1. Groq（最速）
+    prompt_short = PROMPT.replace("{today}", TODAY).replace("{data}", short_data)
+    prompt_long = PROMPT.replace("{today}", TODAY).replace("{data}", long_data)
+
     print("[1/3] Groq...")
-    result = call_groq(prompt)
+    result = call_groq(prompt_short)
     if result and len(result) > 200:
         return result
 
-    # 2. OpenRouter（無料Llama）
     print("[2/3] OpenRouter...")
-    result = call_openrouter(prompt)
+    result = call_openrouter(prompt_long)
     if result and len(result) > 200:
         return result
 
-    # 3. Gemini（バックアップ）
     print("[3/3] Gemini...")
-    result = call_gemini(prompt)
+    result = call_gemini(prompt_long)
     if result and len(result) > 200:
         return result
 
-    return "本日はAI要約が取得できませんでした。次回の自動実行をお待ちください。"
+    return "AI要約取得失敗。次回自動実行をお待ちください。"
 
 
-def save_html(full_summary):
+def save_html(summary):
     os.makedirs("docs", exist_ok=True)
-    body = full_summary
+    body = summary
     body = body.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
     body = body.replace("\n", "\n<br>")
     body = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', body)
@@ -202,7 +201,7 @@ hr{border-color:#21262d}
 <br>
 """ + body + """
 <hr>
-<p class="t">GitHub Actions + AI(Groq/OpenRouter/Gemini) 自動生成</p>
+<p class="t">自動生成（Groq/OpenRouter/Gemini + GitHub Actions）完全無料</p>
 </body>
 </html>"""
 
@@ -237,7 +236,7 @@ def send_discord(msg):
 
 
 def main():
-    print("=== v1.8 " + TODAY + " ===")
+    print("=== v1.9 " + TODAY + " ===")
 
     all_texts = []
     for t in TARGETS:
@@ -260,10 +259,7 @@ def main():
     if len(short) > 1500:
         short = short[:1500]
 
-    discord_msg = "📋 **ポイ活日報 " + TODAY + "**\n\n"
-    discord_msg += short
-    discord_msg += "\n\n📖 全文→ " + pages_url
-
+    discord_msg = "📋 **ポイ活日報 " + TODAY + "**\n\n" + short + "\n\n📖 全文→ " + pages_url
     send_discord(discord_msg)
     print("完了！")
 
