@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-ポイ活クローラー v1.6 - モデル変更で出力安定化
+ポイ活クローラー v1.7 - Groq(Llama)メイン+Geminiバックアップ
 """
 
 import os
@@ -12,6 +12,7 @@ from datetime import datetime, timezone, timedelta
 from bs4 import BeautifulSoup
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 DISCORD_WEBHOOK = os.environ.get("DISCORD_WEBHOOK", "")
 GITHUB_REPO = os.environ.get("GITHUB_REPOSITORY", "benrifylab/test")
 JST = timezone(timedelta(hours=9))
@@ -35,8 +36,36 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 }
 
-# 思考トークンを使わないモデル = 出力に全トークンを使える
-GEMINI_MODEL = "gemini-2.0-flash"
+PROMPT_TEMPLATE = """あなたはポイ活の達人です。以下は本日{today}にクロールした日本のお得情報サイトの生データです。
+
+この中から今日使えるお得情報を抽出して、以下のフォーマットで出力してください。
+
+ルール:
+- 必ず15件以上抽出すること
+- 各案件は1行で書く
+- 割引額、還元率、当選人数などの数字を含める
+- 期限切れは含めない
+- お得度が高い順
+
+フォーマット:
+
+🛒 EC・ネット通販
+・案件名：内容（~M/D）
+
+💳 クレカ・キャッシュレス
+・案件名：内容（~M/D）
+
+🍔 外食・フード
+・案件名：内容（~M/D）
+
+🎁 懸賞・無料
+・案件名：内容（~M/D）
+
+📱 携帯・通信
+・案件名：内容（~M/D）
+
+--- 生データ ---
+{data}"""
 
 
 def crawl_site(url):
@@ -57,59 +86,80 @@ def crawl_site(url):
         return ""
 
 
-def call_gemini(prompt, max_tokens=4000):
-    api_url = "https://generativelanguage.googleapis.com/v1beta/models/" + GEMINI_MODEL + ":generateContent?key=" + GEMINI_API_KEY
+def call_groq(prompt):
+    """Groq API (Llama) - 無料・爆速"""
+    if not GROQ_API_KEY:
+        return ""
+    url = "https://api.groq.com/openai/v1/chat/completions"
+    headers = {
+        "Authorization": "Bearer " + GROQ_API_KEY,
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": "llama-3.3-70b-versatile",
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 4000,
+        "temperature": 0.3
+    }
+    for attempt in range(2):
+        try:
+            resp = requests.post(url, json=payload, headers=headers, timeout=120)
+            resp.raise_for_status()
+            text = resp.json()["choices"][0]["message"]["content"]
+            print("  Groq出力: " + str(len(text)) + "字")
+            return text
+        except Exception as e:
+            print("  Groq試行" + str(attempt + 1) + ": " + str(e)[:100])
+            if attempt < 1:
+                time.sleep(10)
+    return ""
+
+
+def call_gemini(prompt):
+    """Gemini API - バックアップ"""
+    if not GEMINI_API_KEY:
+        return ""
+    api_url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=" + GEMINI_API_KEY
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"maxOutputTokens": max_tokens, "temperature": 0.3}
+        "generationConfig": {"maxOutputTokens": 4000, "temperature": 0.3}
     }
-    for attempt in range(3):
+    for attempt in range(2):
         try:
             resp = requests.post(api_url, json=payload, timeout=120)
             resp.raise_for_status()
-            data = resp.json()
-            text = data["candidates"][0]["content"]["parts"][0]["text"]
+            text = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
             print("  Gemini出力: " + str(len(text)) + "字")
             return text
         except Exception as e:
             error_msg = str(e)
             if GEMINI_API_KEY:
                 error_msg = error_msg.replace(GEMINI_API_KEY, "***")
-            print("  Gemini試行" + str(attempt + 1) + "/3: " + error_msg)
-            if attempt < 2:
-                time.sleep(30)
+            print("  Gemini試行" + str(attempt + 1) + ": " + error_msg[:100])
+            if attempt < 1:
+                time.sleep(15)
     return ""
 
 
-def make_full_summary(all_data):
-    prompt = "あなたはポイ活の達人です。以下は本日" + TODAY + "にクロールした日本のお得情報サイトの生データです。\n\n"
-    prompt += "この中から今日使えるお得情報を抽出して、以下のフォーマットで出力してください。\n\n"
-    prompt += "ルール:\n"
-    prompt += "- 必ず15件以上抽出すること\n"
-    prompt += "- 各案件は1行で「案件名：内容（期限）」と書く\n"
-    prompt += "- 割引額、還元率、当選人数などの数字を含める\n"
-    prompt += "- 期限切れの案件は含めない\n"
-    prompt += "- お得度が高い順に並べる\n\n"
-    prompt += "出力フォーマット:\n\n"
-    prompt += "🛒 EC・ネット通販\n"
-    prompt += "・案件名：内容（~M/D）\n"
-    prompt += "・案件名：内容（~M/D）\n\n"
-    prompt += "💳 クレカ・キャッシュレス\n"
-    prompt += "・案件名：内容（~M/D）\n\n"
-    prompt += "🍔 外食・フード\n"
-    prompt += "・案件名：内容（~M/D）\n\n"
-    prompt += "🎁 懸賞・無料\n"
-    prompt += "・案件名：内容（~M/D）\n\n"
-    prompt += "📱 携帯・通信\n"
-    prompt += "・案件名：内容（~M/D）\n\n"
-    prompt += "--- 以下が生データ ---\n"
-    prompt += all_data[:20000]
-    return call_gemini(prompt, max_tokens=4000)
+def summarize(all_data):
+    """Groq優先、失敗したらGemini"""
+    prompt = PROMPT_TEMPLATE.replace("{today}", TODAY).replace("{data}", all_data[:18000])
+
+    print("  [1] Groq (Llama3.3-70B) で要約中...")
+    result = call_groq(prompt)
+    if result and len(result) > 200:
+        return result
+
+    print("  [2] Gemini 2.0 Flash にフォールバック...")
+    result = call_gemini(prompt)
+    if result and len(result) > 200:
+        return result
+
+    return "本日はAI要約が取得できませんでした。次回の自動実行をお待ちください。"
 
 
 def save_html(full_summary):
     os.makedirs("docs", exist_ok=True)
-
     body = full_summary
     body = body.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
     body = body.replace("\n", "\n<br>")
@@ -131,11 +181,11 @@ hr{border-color:#21262d}
 </head>
 <body>
 <h1>📋 ポイ活日報</h1>
-<p class="t">""" + TODAY + """ 更新 ｜ 自動生成</p>
+<p class="t">""" + TODAY + """ 更新</p>
 <br>
 """ + body + """
 <hr>
-<p class="t">GitHub Actions + Gemini 2.0 Flash で自動生成</p>
+<p class="t">Groq(Llama) + GitHub Actions で自動生成（完全無料）</p>
 </body>
 </html>"""
 
@@ -170,7 +220,7 @@ def send_discord(msg):
 
 
 def main():
-    print("=== v1.6 " + TODAY + " ===")
+    print("=== v1.7 " + TODAY + " ===")
 
     # 1. クロール
     all_texts = []
@@ -183,29 +233,23 @@ def main():
     combined = "\n".join(all_texts)
     print("合計" + str(len(combined)) + "字")
 
-    # 2. Gemini全文要約
-    print("Gemini 2.0 Flash 全文要約中...")
-    full = make_full_summary(combined)
-    if not full:
-        full = "本日のGemini API応答なし。次回自動実行をお待ちください。"
+    # 2. AI要約（Groq優先→Geminiバックアップ）
+    full = summarize(combined)
 
     # 3. GitHub Pages保存
     save_html(full)
     git_push()
 
-    # 4. Discord送信（先頭+リンク）
+    # 4. Discord（先頭+リンク）
     pages_url = "https://" + GITHUB_REPO.split("/")[0] + ".github.io/" + GITHUB_REPO.split("/")[1] + "/"
-
-    # 全文から先頭10行を切り出し
     lines = full.strip().split("\n")
-    top_lines = lines[:15]
-    short = "\n".join(top_lines)
+    short = "\n".join(lines[:15])
     if len(short) > 1500:
         short = short[:1500]
 
     discord_msg = "📋 **ポイ活日報 " + TODAY + "**\n\n"
     discord_msg += short
-    discord_msg += "\n\n...続きは↓\n📖 " + pages_url
+    discord_msg += "\n\n📖 全文→ " + pages_url
 
     send_discord(discord_msg)
     print("完了！")
