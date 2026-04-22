@@ -24,7 +24,9 @@ jobs:
       - run: pip install -r requirements.txt
       - run: python poi_crawler.py
         env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          CEREBRAS: ${{ secrets.CEREBRAS }}
           OR_API_KEY: ${{ secrets.OR_API_KEY }}
+          COHERE: ${{ secrets.COHERE }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
